@@ -1,3 +1,99 @@
+
+
+def defaults(year, month, room_id, electric_price, water_price, other_fee):
+    room = get_room(room_id)
+    prev_year, prev_month = previous_period(year, month)
+    previous = get_bill(prev_year, prev_month, room_id)
+    old_e = previous['new_electric'] if previous else 0
+    old_w = previous['new_water'] if previous else 0
+    return dict(year=year, month=month, room_id=room_id,
+                tenant_name=room['tenant_name'], phone=room['phone'], rent=room['default_rent'],
+                old_electric=old_e, new_electric=old_e, old_water=old_w, new_water=old_w,
+                electric_price=electric_price, water_price=water_price,
+                other_fee=other_fee, status=STATUS[0])
+
+
+def save_bill(bill):
+    columns = ('year', 'month', 'room_id', 'tenant_name', 'phone', 'rent',
+               'old_electric', 'new_electric', 'old_water', 'new_water',
+               'electric_price', 'water_price', 'other_fee', 'status')
+    values = [bill[k] for k in columns]
+    with connect() as conn:
+        conn.execute('''INSERT INTO rooms(room_id, tenant_name, phone, default_rent)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(room_id) DO UPDATE SET
+                        tenant_name=excluded.tenant_name, phone=excluded.phone,
+                        default_rent=excluded.default_rent''',
+                     (bill['room_id'], bill['tenant_name'], bill['phone'], bill['rent']))
+        conn.execute(f'''INSERT INTO bills ({', '.join(columns)})
+                        VALUES ({', '.join(['?'] * len(columns))})
+                        ON CONFLICT(year, month, room_id) DO UPDATE SET
+                        {', '.join(f'{c}=excluded.{c}' for c in columns if c not in ('year', 'month', 'room_id'))},
+                        updated_at=CURRENT_TIMESTAMP''', values)
+
+
+def calculate(bill):
+    electric_usage = bill['new_electric'] - bill['old_electric']
+    water_usage = bill['new_water'] - bill['old_water']
+    electric_amount = electric_usage * bill['electric_price']
+    water_amount = water_usage * bill['water_price']
+    total = bill['rent'] + electric_amount + water_amount + bill['other_fee']
+    return electric_usage, water_usage, electric_amount, water_amount, total
+
+
+def money(value):
+    return f'{value:,.0f}'.replace(',', '.') + ' đ'
+
+
+def pdf_font():
+    paths = [
+        ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
+        ('C:/Windows/Fonts/arial.ttf', 'C:/Windows/Fonts/arialbd.ttf'),
+        ('/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf', '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf'),
+    ]
+    for normal, bold in paths:
+        if Path(normal).is_file() and Path(bold).is_file():
+            if 'TroRegular' not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont('TroRegular', normal))
+                pdfmetrics.registerFont(TTFont('TroBold', bold))
+            return 'TroRegular', 'TroBold'
+    raise RuntimeError('Không tìm thấy font Unicode. Cài font DejaVu Sans hoặc Arial để xuất PDF tiếng Việt.')
+
+
+def make_pdf(bill):
+    regular, bold = pdf_font()
+    _, _, electric_amount, water_amount, total = calculate(bill)
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=(210 * mm, 297 * mm),
+                            leftMargin=20 * mm, rightMargin=20 * mm,
+                            topMargin=18 * mm, bottomMargin=18 * mm)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='TroTitle', fontName=bold, fontSize=17, leading=24,
+                              alignment=TA_CENTER, textColor=colors.HexColor('#17365D'), spaceAfter=10))
+    styles.add(ParagraphStyle(name='TroText', fontName=regular, fontSize=10, leading=17))
+    styles.add(ParagraphStyle(name='TroBoldText', parent=styles['TroText'], fontName=bold))
+    styles.add(ParagraphStyle(name='TroRight', parent=styles['TroText'], alignment=TA_RIGHT))
+    p = lambda s, sty='TroText': Paragraph(escape(str(s)), styles[sty])
+    story = [p('HÓA ĐƠN TIỀN PHÒNG TRỌ', 'TroTitle'),
+             p(f"Phòng {bill['room_id']}  |  Tháng {bill['month']:02d}/{bill['year']}", 'TroBoldText'),
+             Spacer(1, 8),
+             p('Người thuê: ' + (bill['tenant_name'] or 'Chưa cập nhật')),
+             p('Số điện thoại: ' + (bill['phone'] or 'Chưa cập nhật')),
+             Spacer(1, 14)]
+    rows = [
+        [p('Khoản thu', 'TroBoldText'), p('Chi tiết', 'TroBoldText'), p('Thành tiền', 'TroBoldText')],
+        [p('Tiền phòng'), p('Giá thuê tháng'), p(money(bill['rent']), 'TroRight')],
+        [p('Tiền điện'), p(f"{bill['old_electric']} → {bill['new_electric']} kWh × {money(bill['electric_price'])}"), p(money(electric_amount), 'TroRight')],
+        [p('Tiền nước'), p(f"{bill['old_water']} → {bill['new_water']} m³ × {money(bill['water_price'])}"), p(money(water_amount), 'TroRight')],
+        [p('Phí khác'), p('Wifi, vệ sinh, ...'), p(money(bill['other_fee']), 'TroRight')],
+        [p('TỔNG CỘNG', 'TroBoldText'), p(''), p(money(total), 'TroBoldText')],
+    ]
+    table = Table(rows, colWidths=[43 * mm, 76 * mm, 51 * mm], repeatRows=1, hAlign='LEFT')
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E8F0FA')),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#EDF5EE')),
+        ('LINEBELOW', (0, 0), (-1, -1), 0.35, colors.HexColor('#C7D2DE')),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('LEFTPADDING', (0, 0), (-1, -1), 9),
         ('RIGHTPADDING', (0, 0), (-1, -1), 9),
         ('TOPPADDING', (0, 0), (-1, -1), 11),
@@ -62,64 +158,3 @@ with st.form(key=f'edit_{nam}_{thang}_{phong}'):
     with d2:
         w_price = st.number_input('Đơn giá nước', min_value=0, value=int(record['water_price']), step=500)
     with d3:
-        other = st.number_input('Phí khác', min_value=0, value=int(record['other_fee']), step=10000)
-    with d4:
-        status = st.selectbox('💳 Trạng thái thanh toán', STATUS,
-                              index=STATUS.index(record['status']) if record['status'] in STATUS else 0)
-    submitted = st.form_submit_button('💾 Lưu dữ liệu phòng', type='primary')
-    if submitted:
-        if new_e < old_e or new_w < old_w:
-            st.error('Số điện/nước MỚI không được nhỏ hơn số CŨ. Vui lòng kiểm tra.')
-        else:
-            updated = dict(year=nam, month=thang, room_id=phong,
-                           tenant_name=tenant.strip(), phone=phone.strip(), rent=rent,
-                           old_electric=old_e, new_electric=new_e,
-                           old_water=old_w, new_water=new_w,
-                           electric_price=e_price, water_price=w_price,
-                           other_fee=other, status=status)
-            save_bill(updated)
-            st.success('Đã lưu dữ liệu vào SQLite!')
-            st.rerun()
-
-if existing:
-    _, _, _, _, current_total = calculate(existing)
-    st.metric('💰 Tổng hóa đơn phòng đang chọn', money(current_total))
-    try:
-        pdf_bytes = make_pdf(existing)
-        st.download_button('📄 Xuất PDF phòng này', data=pdf_bytes,
-                           file_name=f'Hoa_don_phong_{phong}_{thang:02d}_{nam}.pdf',
-                           mime='application/pdf')
-    except RuntimeError as exc:
-        st.error(str(exc))
-
-st.divider()
-st.header(f'📊 Bảng tổng hợp - Tháng {thang}/{nam}')
-with connect() as conn:
-    saved = [dict(r) for r in conn.execute('''SELECT * FROM bills WHERE year=? AND month=? AND room_id<=?
-                                              ORDER BY room_id''', (nam, thang, so_phong))]
-rows = []
-for bill in saved:
-    _, _, tien_dien, tien_nuoc, total = calculate(bill)
-    rows.append({'Phòng': f"Phòng {bill['room_id']}", 'Người ở': bill['tenant_name'],
-                 'Số điện thoại': bill['phone'], 'Giá phòng': bill['rent'],
-                 'Số điện cũ': bill['old_electric'], 'Số điện mới': bill['new_electric'],
-                 'Tiền điện': tien_dien, 'Số nước cũ': bill['old_water'],
-                 'Số nước mới': bill['new_water'], 'Tiền nước': tien_nuoc,
-                 'Phí khác': bill['other_fee'], 'Tổng tiền': total,
-                 'Trạng thái': bill['status']})
-if rows:
-    df = pd.DataFrame(rows)
-    monetary_cols = ['Giá phòng', 'Tiền điện', 'Tiền nước', 'Phí khác', 'Tổng tiền']
-    st.dataframe(df, width="stretch", hide_index=True,
-                 column_config={c: st.column_config.NumberColumn(format='%d') for c in monetary_cols})
-    paid = sum(row['Tổng tiền'] for row in rows if row['Trạng thái'] == STATUS[1])
-    unpaid = sum(row['Tổng tiền'] for row in rows if row['Trạng thái'] == STATUS[0])
-    m1, m2, m3 = st.columns(3)
-    m1.metric('Tổng phải thu', money(paid + unpaid))
-    m2.metric('Đã thu', money(paid))
-    m3.metric('Chưa thu', money(unpaid))
-    st.download_button('📥 Xuất báo cáo CSV', data=df.to_csv(index=False).encode('utf-8-sig'),
-                       file_name=f'Bang_Tien_Phong_{thang:02d}_{nam}.csv', mime='text/csv')
-else:
-    st.info('Chưa có hóa đơn nào được lưu trong tháng này.')
-st.caption(f'Cơ sở dữ liệu SQLite: {DB_PATH}. Hãy sao lưu file này định kỳ.')
