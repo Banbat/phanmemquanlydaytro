@@ -241,37 +241,16 @@ def money(value):
 # XUAT PDF
 # =========================================
 
+
 def pdf_font():
-    paths = [
-        (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        ),
-        (
-            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
-        ),
-        (
-            "C:/Windows/Fonts/arial.ttf",
-            "C:/Windows/Fonts/arialbd.ttf"
-        )
-    ]
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
-    for normal, bold in paths:
-        if Path(normal).is_file() and Path(bold).is_file():
-            if "TroRegular" not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(
-                    TTFont("TroRegular", normal)
-                )
-                pdfmetrics.registerFont(
-                    TTFont("TroBold", bold)
-                )
+    font = "STSong-Light"
+    if font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont(font))
 
-            return "TroRegular", "TroBold"
-
-    raise RuntimeError(
-        "Không tìm thấy font Unicode để xuất PDF tiếng Việt."
-    )
+    return font, font
 
 
 def make_pdf(bill):
